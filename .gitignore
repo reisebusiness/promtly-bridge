@@ -1,0 +1,5 @@
+# Written by the bridge, next to itself, on your machine. Your theme, your
+# local script, your cached copy of the board — none of it belongs here.
+promtly-local/
+PROMTLY-CUSTOMIZE.md
+*.bak

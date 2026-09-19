@@ -1,0 +1,52 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    # Runs on three Node versions because this file is downloaded and run by
+    # whatever Node someone happens to have. It must parse on all of them.
+    strategy:
+      matrix:
+        node: [20, 22, 24]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+      - name: it parses
+        run: node --check promtly-bridge.mjs
+      - name: it has no dependencies
+        # The promise in the README is checkable, so check it.
+        run: |
+          if [ -f package.json ] || [ -d node_modules ]; then
+            echo "This repo must stay dependency-free — no package.json, no node_modules."
+            exit 1
+          fi
+          if grep -nE "^\s*import .* from ['\"][^.n]" promtly-bridge.mjs | grep -v "node:"; then
+            echo "Found a non-node: import. The bridge must only use the standard library."
+            exit 1
+          fi
+          echo "dependency-free: only node: builtins are imported"
+      - name: it starts, serves, and stops
+        # On Linux the driver is unsupported, so it starts, says so, and still
+        # mirrors the board — which is exactly the behaviour worth pinning.
+        run: |
+          PROMTLY_BRIDGE_PORT=37299 node promtly-bridge.mjs &
+          PID=$!
+          for i in $(seq 1 20); do
+            sleep 1
+            if curl -fsS "http://127.0.0.1:37299/health" > /tmp/health.json; then break; fi
+          done
+          cat /tmp/health.json
+          node -e "const h=require('/tmp/health.json'); if(!h.ok) throw new Error('health not ok'); if(!h.version) throw new Error('no version'); console.log('bridge '+h.version+' answered /health')"
+          kill $PID

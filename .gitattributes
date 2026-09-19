@@ -1,0 +1,4 @@
+# LF everywhere, including the .cmd. A batch file with LF endings was measured
+# to run correctly under cmd.exe, and these bytes are what promtly.dev serves.
+* text=auto eol=lf
+*.cmd text eol=lf
