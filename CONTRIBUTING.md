@@ -31,8 +31,10 @@ their own machine. Every dependency is something they would have to trust too,
 and "audit this one file" stops being a real offer the moment there is a
 `node_modules`. Node's standard library has been enough for 2,000 lines.
 
-**Nothing of the user's leaves the machine.** It binds to `127.0.0.1`, and its
-one outbound request fetches the board. A change that sends prompts, window
+**Nothing of the user's leaves the machine.** It binds to `127.0.0.1`, and it
+talks to exactly one host, promtly.dev, for two things: the board it mirrors,
+and a check every six hours for a newer bridge. Neither carries anything of the
+user's. A change that sends prompts, window
 titles or clipboard contents anywhere is not a feature request — it is a
 different program, and it would break the promise the README makes.
 
