@@ -11,6 +11,13 @@ serve the board at `http://127.0.0.1:37222` and print a line for every paste,
 including what it targeted and whether focus settled. That log is usually the
 whole diagnosis for a bug report.
 
+If you are working on the board itself and want its dev server to be able to
+drive the bridge, you have to say so — no local origin is trusted by default:
+
+```bash
+PROMTLY_ALLOW_ORIGIN=http://localhost:3350 node promtly-bridge.mjs
+```
+
 ```bash
 node --check promtly-bridge.mjs        # what CI runs
 node promtly-bridge.mjs --install-startup    # start at sign-in

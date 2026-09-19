@@ -22,14 +22,29 @@ and double-click it — it fetches this script itself and starts it.
 
 | | |
 | --- | --- |
-| **Binds to 127.0.0.1 only** | nothing off your machine can reach it |
-| **One outbound request** | fetches the board from promtly.dev; sends nothing of yours with it |
-| **Answers only named origins** | a state-changing request without an allowed `Origin` is refused, so another site cannot drive it |
+| **Binds to 127.0.0.1 only** | `server.listen(PORT, "127.0.0.1")` — nothing off your machine can reach it |
+| **Talks only to promtly.dev** | two kinds of outbound call, both to that one host: fetching the board, and asking every six hours whether a newer bridge exists. Neither sends anything of yours |
+| **Answers only named origins** | a state-changing request without an allowed `Origin` is refused, so another site cannot drive it. No local origin is trusted by default |
 | **Verifies before it types** | focuses the target, checks focus actually landed, and declines to send Ctrl+V if Windows refused the switch |
-| **Stores nothing** | your pads live in your browser's storage; this process holds a window handle and a clipboard string |
+| **Keeps nothing of yours** | your pads live in your browser's storage. Captured selections are held in memory only and never touch the disk |
 
-The last one is the important one. A prompt typed into the wrong window is
+That fourth row is the important one. A prompt typed into the wrong window is
 worse than no paste, so it would rather tell you to press Ctrl+V yourself.
+
+### What it does write to disk
+
+Being precise, because "stores nothing" would be a lie:
+
+| path | what |
+| --- | --- |
+| `promtly-local/theme.css` | yours to edit; created once and never overwritten |
+| `promtly-local/cache/` | a copy of the board from promtly.dev, so the launcher opens offline |
+| `PROMTLY-CUSTOMIZE.md` | the token reference, rewritten when it changes |
+| a temp `.ps1` | the PowerShell driver source, in the OS temp dir |
+| a Startup `.cmd` | **only** if you ask for it (`--install-startup`) |
+| `promtly-bridge.mjs.bak` | the previous version, kept when you take an update |
+
+None of that is your prompts, your clipboard, or anything about how you use it.
 
 ## How it works
 
