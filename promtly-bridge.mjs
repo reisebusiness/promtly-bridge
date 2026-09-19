@@ -7,11 +7,16 @@
  * permissions. This process does the parts the page is not allowed to,
  * and it is what turns a web page full of buttons into a launcher:
  *
- *   Ctrl+Alt+Space  summon — remember the window you are in, then bring
- *                   the board up over it. Firing a pad pastes back into
- *                   the window you were in when you summoned it.
- *   Ctrl+Alt+C      capture — copy whatever is selected anywhere on the
- *                   machine and turn it into a new pad.
+ *   summon   remember the window you are in, then bring the board up over
+ *            it. Firing a pad pastes back into the window you were in when
+ *            you summoned it.
+ *   capture  copy whatever is selected anywhere on the machine and turn it
+ *            into a new pad.
+ *
+ * ⚠ The actual chords are chosen AT STARTUP from a candidate list, because a
+ * global shortcut can already belong to another app and RegisterHotKey just
+ * returns false. Never name a specific chord in documentation — the running
+ * bridge prints the pair it won, and /health reports it.
  *
  * It also SERVES the board at http://127.0.0.1:37222, mirrored from
  * promtly.dev. That is not a convenience: a page on https://promtly.dev
@@ -49,7 +54,7 @@ import { tmpdir, homedir, EOL } from "node:os";
 import { join, dirname, resolve as resolvePath } from "node:path";
 
 const PORT = Number(process.env.PROMTLY_BRIDGE_PORT || 37222);
-const VERSION = "0.7.0";
+const VERSION = "0.7.1";
 
 /** Where the board is served from, for the local mirror. */
 const UPSTREAM = (process.env.PROMTLY_UPSTREAM || "https://promtly.dev").replace(/\/+$/, "");
@@ -62,8 +67,13 @@ const ALLOWED_ORIGINS = new Set([
   "https://www.promtly.dev",
   `http://127.0.0.1:${PORT}`,
   `http://localhost:${PORT}`,
-  "http://localhost:3350",
-  "http://127.0.0.1:3350",
+  // ⛔ NO HARDCODED DEV ORIGIN. This used to carry localhost:3350 so the
+  // board's dev server could drive the bridge — which shipped to every user
+  // and meant any page served on a very common local port could paste into
+  // their windows and read their captures. Developing the board now means
+  // asking for it explicitly:
+  //
+  //   PROMTLY_ALLOW_ORIGIN=http://localhost:3350 node promtly-bridge.mjs
   ...(process.env.PROMTLY_ALLOW_ORIGIN
     ? process.env.PROMTLY_ALLOW_ORIGIN.split(",").map((s) => s.trim()).filter(Boolean)
     : []),
