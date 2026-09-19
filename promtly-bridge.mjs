@@ -54,7 +54,7 @@ import { tmpdir, homedir, EOL } from "node:os";
 import { join, dirname, resolve as resolvePath } from "node:path";
 
 const PORT = Number(process.env.PROMTLY_BRIDGE_PORT || 37222);
-const VERSION = "0.7.1";
+const VERSION = "0.7.2";
 
 /** Where the board is served from, for the local mirror. */
 const UPSTREAM = (process.env.PROMTLY_UPSTREAM || "https://promtly.dev").replace(/\/+$/, "");
@@ -211,7 +211,7 @@ bridge serves, after the app mounts.
 
 ## Ready-made looks
 
-Two are published; fetch one into theme.css and edit from there.
+Three are published; fetch one into theme.css and edit from there.
 
     promtly.dev/themes/terminal.css   green phosphor, square corners, mono
     promtly.dev/themes/brass.css      warm charcoal and brass, serif display
