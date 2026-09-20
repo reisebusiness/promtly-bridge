@@ -42,6 +42,7 @@ import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
   writeFileSync,
+  copyFileSync,
   mkdtempSync,
   existsSync,
   mkdirSync,
@@ -1155,10 +1156,15 @@ function startupShortcutPath() {
   );
 }
 
+// A workstation may provision a native windowless launcher. Preserve that choice
+// when the user toggles startup; never recreate its retired console wrapper.
+function quietStartupPath() { return startupShortcutPath().replace(/\.cmd$/, ".lnk"); }
+function quietStartupTemplate() { return join(homedir(), "AppData/Local/Promtly/quiet-startup/promtly-bridge.lnk"); }
+
 /** Is the sign-in entry there right now? The toggle in the UI reads this. */
 function startupInstalled() {
   try {
-    return existsSync(startupShortcutPath());
+    return existsSync(startupShortcutPath()) || existsSync(quietStartupPath());
   } catch {
     return false;
   }
@@ -1171,6 +1177,18 @@ function manageStartup(action) {
   }
   const target = startupShortcutPath();
   try {
+    if (action === "install" && existsSync(quietStartupTemplate())) {
+      mkdirSync(dirname(target), { recursive: true });
+      if (existsSync(target)) {
+        if (!readFileSync(target, "utf8").includes("REM Starts the Promtly bridge at sign-in.")) throw Error("An unrelated startup command uses this name");
+        // Keep a recoverable copy outside Startup before removing the old entry.
+        copyFileSync(target, join(dirname(quietStartupTemplate()), "previous-startup.cmd"));
+        rmSync(target);
+      }
+      copyFileSync(quietStartupTemplate(), quietStartupPath());
+      console.log("Promtly will start silently with Windows.");
+      return 0;
+    }
     if (action === "install") {
       const script = resolvePath(process.argv[1]);
       mkdirSync(dirname(target), { recursive: true });
@@ -1226,6 +1244,7 @@ function manageStartup(action) {
   ${menu}
   (also in the Start menu as "Promtly")`);
     } else {
+      rmSync(quietStartupPath(), { force: true });
       try {
         rmSync(startMenuShortcutPath(), { force: true });
       } catch {
