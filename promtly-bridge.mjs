@@ -91,12 +91,16 @@ const API_PATHS = new Set([
   "/local/custom.js",
   "/local/version",
   "/local/theme",
+  "/local/pads",
+  "/local/alive",
   "/dismiss",
   "/chairs",
   "/chairs/seat",
   "/chairs/unseat",
   "/relay",
   "/window",
+  "/launcher",
+  "/client",
   "/startup",
   "/update",
 ]);
@@ -236,6 +240,39 @@ const LOCAL_DIR = resolvePath(
 );
 const THEME_FILE = join(LOCAL_DIR, "theme.css");
 const CUSTOM_JS = join(LOCAL_DIR, "custom.js");
+// A copy of your decks, so software on this same machine can offer your own
+// pads. The board stays the source of truth; this is written only by the board
+// this process serves, and read only over loopback.
+//
+// ⛔ NOT in LOCAL_DIR. That folder can sit inside a deployable public/ tree —
+// it does in the Promtly repo itself — and a file of someone's prompts must
+// never be able to ride out with a site deploy. It lives with the user's own
+// application data instead.
+const PADS_FILE = resolvePath(process.env.PROMTLY_PADS_FILE
+  || join(process.env.LOCALAPPDATA || join(homedir(), ".local", "share"), "Promtly", "pads.json"));
+// Where pads go by default. Kept with the pads file (not in LOCAL_DIR) for the
+// same reason: it is the user's setting, not something a site deploy carries.
+const SETTINGS_FILE = join(dirname(PADS_FILE), "settings.json");
+/**
+ * The clients a pad can default to, matched by window title. "auto" is the
+ * original behaviour: the window you summoned from. Parley reads this list, so
+ * adding a client here adds it to Parley's picker too.
+ */
+const CLIENTS = [
+  { id: "auto", label: "The window you were in", pattern: "" },
+  { id: "parley", label: "Parley", pattern: "^Parley$" },
+  { id: "claude", label: "Claude", pattern: "^Claude$| - Claude( - |$)" },
+  { id: "chatgpt", label: "ChatGPT", pattern: "ChatGPT" },
+  { id: "codex", label: "Codex", pattern: "\\bCodex\\b" },
+  { id: "vscode", label: "VS Code", pattern: "Visual Studio Code" },
+  { id: "cursor", label: "Cursor", pattern: "^Cursor$| - Cursor$" },
+];
+function readSettings() {
+  try { return JSON.parse(readFileSync(SETTINGS_FILE, "utf8")) || {}; } catch { return {}; }
+}
+function currentClient() {
+  return CLIENTS.find((client) => client.id === readSettings().client) || CLIENTS[0];
+}
 const GUIDE_FILE = resolvePath(join(dirname(process.argv[1] || "."), "PROMTLY-CUSTOMIZE.md"));
 
 const THEME_SEED = `/* Your copy of Promtly. Anything you redefine here wins.
@@ -308,6 +345,34 @@ function readLocal(file) {
  * change, so a restyle does not reload the page and lose what you were
  * typing.
  */
+/**
+ * Reload a page whose app never booted.
+ *
+ * ⚠ Found 2026-09-20: the bridge restarted and auto-opened the launcher, the
+ * HTML and five scripts arrived, the stylesheet and three chunks did not, and
+ * the window sat on an unstyled "Loading your pads…" for good - nothing ever
+ * asked again. Any transient gap does this (sign-in before the network is up,
+ * a bridge restart mid-load), so the page checks itself: Next sets window.next
+ * when it hydrates, and a stylesheet that failed has no .sheet. Missing either
+ * after a few seconds, it reloads, backing off to 30s and resetting once a
+ * load succeeds. Only on pages that are actually a Next app.
+ *
+ * A page that booted also checks in (/local/alive) every 20s, so the bridge can
+ * tell a live launcher from a dead one when it is asked to show it - see
+ * showLauncher(). Chrome throttles a hidden page's timers to about once a
+ * minute, which is why "alive" allows 90s.
+ */
+const BOOT_WATCHDOG =
+  `(function(){var K="promtly.bootRetry";function ok(){if(!window.next)return false;` +
+  `var l=document.querySelectorAll('link[rel="stylesheet"][href*="/_next/"]');` +
+  `for(var i=0;i<l.length;i++)if(!l[i].sheet)return false;return true}` +
+  `function n(){try{return Number(sessionStorage.getItem(K))||0}catch(e){return 0}}` +
+  `function s(v){try{sessionStorage.setItem(K,String(v))}catch(e){}}` +
+  `function a(){fetch("/local/alive?p="+encodeURIComponent(location.pathname),{cache:"no-store"}).catch(function(){})}` +
+  `setTimeout(function(){if(!document.querySelector('script[src*="/_next/"]'))return;` +
+  `if(ok()){s(0);a();setInterval(a,20000);return}var t=n();s(t+1);` +
+  `setTimeout(function(){location.reload()},Math.min(30000,1000*Math.pow(2,t)))},4000);})();`;
+
 function injectLocalLayer(html) {
   const version = localStamp();
   const hasCustomJs = existsSync(CUSTOM_JS);
@@ -322,6 +387,7 @@ function injectLocalLayer(html) {
     `if(n===v)return;v=n;var l=document.getElementById("promtly-local-theme");` +
     `if(l)l.setAttribute("href","/local/theme.css?v="+encodeURIComponent(n));` +
     `else location.reload();}).catch(function(){});},1500);})();</script>
+<script>${BOOT_WATCHDOG}</script>
 `;
 
   return html.includes("</head>") ? html.replace("</head>", `${tags}</head>`) : html + tags;
@@ -526,7 +592,51 @@ public class PromtlyWin {
   public static bool IsArmed() { return armed != IntPtr.Zero && Eligible(armed); }
   public static bool IsBySummon() { return bySummon && IsArmed(); }
 
+  // DEFAULT CLIENT: a title pattern the owner picked ("pads go to Claude").
+  // When a window matching it is open it wins over both the summon pin and the
+  // guess - that is what "default" means. When none is open, targeting falls
+  // back to the window you were in, so a closed client never strands a pad.
+  static string prefer = "";
+  public static void Prefer(string pattern) { prefer = pattern == null ? "" : pattern; }
+
+  /** The frontmost open window whose title matches the pattern, never the launcher. */
+  public static IntPtr Match(string pattern) {
+    if (String.IsNullOrEmpty(pattern)) return IntPtr.Zero;
+    IntPtr found = IntPtr.Zero;
+    EnumWindows((h, p) => {
+      if (!Eligible(h)) return true;
+      string t = Title(h);
+      if (t == "${LAUNCHER_TITLE}") return true;
+      try {
+        if (System.Text.RegularExpressions.Regex.IsMatch(t, pattern)) { found = h; return false; }
+      } catch { return false; }
+      return true;
+    }, IntPtr.Zero);
+    return found;
+  }
+
+  public static IntPtr Preferred() { return Match(prefer); }
+
+  [DllImport("user32.dll")] public static extern bool PostMessageW(IntPtr hWnd, uint msg, IntPtr w, IntPtr l);
+  /** Ask the launcher window to close (WM_CLOSE) - for a page that never booted. */
+  public static bool CloseLauncher() {
+    IntPtr h = FindByTitle("${LAUNCHER_TITLE}");
+    if (h == IntPtr.Zero) return false;
+    return PostMessageW(h, 0x0010, IntPtr.Zero, IntPtr.Zero);
+  }
+
+  /** Minimise the window in front, unless it is the launcher. For "open the overlay and get Parley out of the way". */
+  public static string MinimizeForeground() {
+    IntPtr fg = GetForegroundWindow();
+    if (fg == IntPtr.Zero || Title(fg) == "${LAUNCHER_TITLE}") return "";
+    string t = Title(fg);
+    ShowWindow(fg, SW_MINIMIZE);
+    return t;
+  }
+
   public static IntPtr Target() {
+    IntPtr p = Preferred();
+    if (p != IntPtr.Zero) return p;
     if (IsArmed()) return armed;
     return Behind();
   }
@@ -648,7 +758,12 @@ while ($true) {
         # a window the person had long since left. A guess is re-taken each
         # time and stays truthful; a window you chose with the chord is sticky
         # until you choose another.
-        if ([PromtlyWin]::IsBySummon()) {
+        $p = [PromtlyWin]::Preferred()
+        if ($p -ne [IntPtr]::Zero) {
+          # The owner's default client is open: it is the target, and it counts
+          # as chosen - they chose it in settings.
+          $h = $p
+        } elseif ([PromtlyWin]::IsBySummon()) {
           $h = [PromtlyWin]::Target()
         } else {
           # Behind() walks from whatever is in FRONT at this instant, so it
@@ -665,7 +780,7 @@ while ($true) {
         }
         # Reported flag means CHOSEN, not merely pinned - the launcher uses it
         # to say whether it is confident about the target.
-        $armed = if ([PromtlyWin]::IsBySummon()) { "1" } else { "0" }
+        $armed = if ($p -ne [IntPtr]::Zero -or [PromtlyWin]::IsBySummon()) { "1" } else { "0" }
         [Console]::Out.WriteLine("T ok " + (Encode ([PromtlyWin]::Title($h))) + " " + $armed)
       }
       "A" {
@@ -695,6 +810,25 @@ while ($true) {
           $ok = [PromtlyWin]::FocusSettled($h, 600)
           [Console]::Out.WriteLine("F " + $(if ($ok) { "ok" } else { "nofocus" }) + " " + (Encode ([PromtlyWin]::Title($h))))
         }
+      }
+      "K" {
+        # Set the default client's title pattern; empty means "the window I was in".
+        [PromtlyWin]::Prefer((Decode $arg))
+        [Console]::Out.WriteLine("K ok ")
+      }
+      "Y" {
+        # Is a window matching this pattern open? Reports its title.
+        $h = [PromtlyWin]::Match((Decode $arg))
+        if ($h -eq [IntPtr]::Zero) { [Console]::Out.WriteLine("Y none " + (Encode "")) }
+        else { [Console]::Out.WriteLine("Y ok " + (Encode ([PromtlyWin]::Title($h)))) }
+      }
+      "X" {
+        # Close the launcher window.
+        [Console]::Out.WriteLine("X " + $(if ([PromtlyWin]::CloseLauncher()) { "ok" } else { "notfound" }) + " ")
+      }
+      "M" {
+        # Minimise whatever is in front (not the launcher).
+        [Console]::Out.WriteLine("M ok " + (Encode ([PromtlyWin]::MinimizeForeground())))
       }
       "H" {
         # Seat the current foreground window under a name.
@@ -922,6 +1056,10 @@ class WindowsDriver {
       const pending = this.queue.splice(0);
       for (const p of pending) p.reject(new Error(`helper exited (${code})`));
     });
+    // ⚠ The preference lives in the helper process, and a helper that died is
+    // restarted on the next request - without it. Re-apply it first, or the
+    // default client silently reverts to "the window you were in".
+    if (this.preference) void this.send("K", this.preference).catch(() => {});
   }
 
   onData(chunk) {
@@ -1019,6 +1157,23 @@ class WindowsDriver {
   dismiss() {
     return this.send("D");
   }
+
+  /** Set the default client's title pattern ("" = the window you were in). */
+  prefer(pattern) {
+    this.preference = pattern || "";
+    return this.send("K", this.preference);
+  }
+  /** Title of the frontmost open window matching a pattern, or "". */
+  async match(pattern) {
+    const reply = await this.send("Y", pattern);
+    return reply.status === "ok" ? reply.title : "";
+  }
+  minimizeForeground() {
+    return this.send("M");
+  }
+  closeLauncher() {
+    return this.send("X");
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -1078,6 +1233,35 @@ function openLauncherWindow() {
     }, 400);
   }
   return true;
+}
+
+/** When a booted launcher page last checked in. 0 = never, since this process started. */
+let launcherAliveAt = 0;
+const LAUNCHER_ALIVE_MS = 90_000;
+
+/**
+ * Show the launcher: raise a live one, replace a dead one, or open one.
+ *
+ * ⛔ Found 2026-09-20, twice: a launcher window whose page never booted sat on
+ * an unstyled "Loading your pads…", and every summon - the chord, Parley's
+ * Open Promtly button - found that window by its title and raised it again.
+ * The watchdog cannot help a page loaded before it existed, and raising a
+ * window cannot tell a live page from a dead one. A page that booted checks in;
+ * a window that has not checked in is closed and a fresh one opened. The cost
+ * of being wrong is one reload of a launcher, which is cheap and cached.
+ */
+async function showLauncher() {
+  const state = await driver.launcherState().catch(() => ({ exists: false }));
+  if (state.exists && Date.now() - launcherAliveAt < LAUNCHER_ALIVE_MS) {
+    await driver.place("full");
+    return { opened: true, reused: true };
+  }
+  if (state.exists) {
+    log("launcher window never checked in — replacing it with a fresh one");
+    await driver.closeLauncher().catch(() => {});
+    await new Promise((done) => setTimeout(done, 400));
+  }
+  return { opened: openLauncherWindow(), reused: false };
 }
 
 class HotkeyHost {
@@ -1396,6 +1580,9 @@ if (argv.includes("--install-startup")) process.exit(manageStartup("install"));
 if (argv.includes("--uninstall-startup")) process.exit(manageStartup("uninstall"));
 
 const driver = supported ? new WindowsDriver() : null;
+if (driver && currentClient().pattern) {
+  void driver.prefer(currentClient().pattern).catch(() => {});
+}
 if (driver) driver.start();
 
 let lastArmed = "";
@@ -1419,14 +1606,7 @@ async function handleHotkey(id) {
       const armed = await driver.arm();
       lastArmed = armed.title;
       log(`summon: target armed as "${armed.title || "(none)"}"`);
-      const found = await driver.focusTitle(LAUNCHER_TITLE);
-      if (found.status === "notfound") {
-        openLauncherWindow();
-        return;
-      }
-      // Now that FindByTitle exists, this actually raises the window it found
-      // and parks it on the right edge.
-      await driver.place("full");
+      await showLauncher();
       return;
     }
     if (id === 2) {
@@ -1625,8 +1805,37 @@ async function fetchUpstream(pathname, search, etag) {
     etag: upstream.headers.get("etag") || "",
     storedAt: Date.now(),
   };
-  if (upstream.status === 200) cacheWrite(cacheKey(pathname, search), head, body);
+  if (upstream.status === 200) {
+    // ⚠ A revalidation that brings a NEW deploy's HTML must not swap it in
+    // before that deploy's chunks are cached: the next open serves the new
+    // HTML from cache, and offline its fingerprinted chunks are misses, so the
+    // page arrives with no stylesheet and never hydrates. Warm first; if any
+    // asset cannot be fetched, keep serving the old page, whose chunks we have.
+    if (etag && head.type.includes("text/html") && !(await warmAssets(body.toString("utf8")))) {
+      return { head, body };
+    }
+    cacheWrite(cacheKey(pathname, search), head, body);
+  }
   return { head, body };
+}
+
+/** Cache every /_next asset a page references. True when all of them are cached. */
+async function warmAssets(html) {
+  const refs = new Set();
+  for (const match of html.matchAll(/\/_next\/static\/[^"'\\\s)]+/g)) refs.add(match[0]);
+  const results = await Promise.all(
+    [...refs].map(async (ref) => {
+      const at = new URL(ref, UPSTREAM);
+      if (cacheRead(cacheKey(at.pathname, at.search))) return true;
+      try {
+        const got = await fetchUpstream(at.pathname, at.search, "");
+        return got !== "unchanged" && got.head.status === 200;
+      } catch {
+        return false;
+      }
+    }),
+  );
+  return results.every(Boolean);
 }
 
 function serveMirrored(res, head, body, isHead) {
@@ -1688,7 +1897,9 @@ async function proxyUpstream(req, res, url) {
   } catch (err) {
     res.writeHead(502, { "Content-Type": "text/html; charset=utf-8" });
     res.end(
-      `<!doctype html><meta charset="utf-8"><title>Promtly bridge</title>` +
+      // Retries itself: this is what a launcher opened at sign-in, before the
+      // network is up, shows - it should turn into the board on its own.
+      `<!doctype html><meta charset="utf-8"><meta http-equiv="refresh" content="5"><title>Promtly bridge</title>` +
         `<body style="background:#0B0F14;color:#F8FAFC;font:14px/1.6 system-ui;padding:48px;max-width:36rem">` +
         `<h1 style="font-weight:600">Cannot reach the board</h1>` +
         `<p style="color:#94A3B8">The bridge is running, but it could not fetch ` +
@@ -1735,7 +1946,12 @@ const server = http.createServer(async (req, res) => {
     (url.pathname === "/startup" && req.method === "GET") ||
     (url.pathname === "/update" && req.method === "GET") ||
     url.pathname === "/chairs" ||
-    url.pathname.startsWith("/local/");
+    // ⚠ Writing your pads is NOT read-only. Software on this machine offers
+    // them as one-tap instructions to a coding agent, so text written here is
+    // closer to script than to a stylesheet: the same reason there is no write
+    // endpoint for custom.js. Only the board this process serves may write
+    // them; anything may read them over loopback.
+    (url.pathname.startsWith("/local/") && !(url.pathname === "/local/pads" && req.method !== "GET"));
   if (!readOnly && !allowed) {
     send(res, 403, { ok: false, error: "origin not allowed" }, undefined);
     return;
@@ -1749,11 +1965,14 @@ const server = http.createServer(async (req, res) => {
     if (req.method === "GET" && url.pathname === "/health") {
       let target = "";
       let armed = false;
+      let onDefault = false;
       if (driver) {
         try {
           const reply = await driver.target();
           target = reply.title;
           armed = reply.extra === "1";
+          const pattern = currentClient().pattern;
+          onDefault = Boolean(pattern && target && (await driver.match(pattern)) === target);
         } catch {
           target = "";
         }
@@ -1768,7 +1987,12 @@ const server = http.createServer(async (req, res) => {
           supported,
           target,
           armed,
+          // The default client, so the launcher can say "your default" rather
+          // than "pinned target" when that is why this window was chosen.
+          client: currentClient().id === "auto" ? null : { id: currentClient().id, label: currentClient().label, target: onDefault },
           captures: captures.length,
+          // True while a launcher page that actually booted keeps checking in.
+          launcherAlive: Date.now() - launcherAliveAt < LAUNCHER_ALIVE_MS,
           hotkeys: hotkeys ? hotkeys.registered : null,
           latest: upstreamVersion,
           updateAvailable: updateAvailable(),
@@ -1821,6 +2045,38 @@ const server = http.createServer(async (req, res) => {
     // ⚠ There is deliberately NO write endpoint for custom.js. A stylesheet
     // cannot execute, so the worst a hostile theme can do is hide things;
     // script is a different category and stays something you place by hand.
+    if (req.method === "GET" && url.pathname === "/local/alive") {
+      if (url.searchParams.get("p") === "/launch") launcherAliveAt = Date.now();
+      send(res, 200, { ok: true }, origin);
+      return;
+    }
+    if (req.method === "GET" && url.pathname === "/local/pads") {
+      let decks = [];
+      try { decks = JSON.parse(readFileSync(PADS_FILE, "utf8")).decks ?? []; } catch { decks = []; }
+      send(res, 200, { ok: true, decks }, origin);
+      return;
+    }
+    if (req.method === "POST" && url.pathname === "/local/pads") {
+      const body = await readJson(req);
+      // Only what another program needs to offer a pad: names and text. Board
+      // settings, usage counts and anything else stay in the browser.
+      const decks = Array.isArray(body.decks) ? body.decks.slice(0, 50).map((deck) => ({
+        id: String(deck?.id ?? "").slice(0, 80),
+        name: String(deck?.name ?? "").slice(0, 120),
+        tiles: (Array.isArray(deck?.tiles) ? deck.tiles : []).slice(0, 200)
+          .filter((tile) => typeof tile?.label === "string" && typeof tile?.body === "string")
+          .map((tile) => ({ id: String(tile.id ?? "").slice(0, 80), label: tile.label.slice(0, 120), body: tile.body.slice(0, 8000) })),
+      })) : null;
+      if (!decks) { send(res, 400, { ok: false, error: "decks required" }, origin); return; }
+      try {
+        mkdirSync(dirname(PADS_FILE), { recursive: true });
+        writeFileSync(PADS_FILE, JSON.stringify({ decks, savedAt: new Date().toISOString() }), "utf8");
+        send(res, 200, { ok: true, decks: decks.length }, origin);
+      } catch (err) {
+        send(res, 500, { ok: false, error: String(err && err.message ? err.message : err) }, origin);
+      }
+      return;
+    }
     if (req.method === "POST" && url.pathname === "/local/theme") {
       const body = await readJson(req);
       const css = typeof body.css === "string" ? body.css : "";
@@ -1946,6 +2202,57 @@ const server = http.createServer(async (req, res) => {
       const reply = await driver.place(mode);
       send(res, 200, { ok: reply.status === "ok", status: reply.status, mode }, origin);
       return;
+    }
+
+    // Open the overlay on request - Parley's "Open Promtly" button and its tray
+    // item. {minimize:true} first puts the window in front (Parley) away, so
+    // the overlay is left over whatever client you actually want to type into.
+    if (req.method === "POST" && url.pathname === "/launcher") {
+      if (!driver) {
+        send(res, 200, { ok: false, error: "unsupported platform" }, origin);
+        return;
+      }
+      const body = await readJson(req);
+      let minimized = "";
+      if (body.minimize === true) minimized = (await driver.minimizeForeground()).title;
+      const shown = await showLauncher();
+      send(res, 200, { ok: shown.opened, reused: shown.reused, minimized }, origin);
+      return;
+    }
+
+    // The default client. GET lists every client with whether a window for it
+    // is open right now, so a picker can say "not open" instead of failing on
+    // the first fire.
+    if (url.pathname === "/client") {
+      if (req.method === "GET") {
+        const chosen = currentClient();
+        const clients = [];
+        for (const client of CLIENTS) {
+          const open = driver && client.pattern ? await driver.match(client.pattern).catch(() => "") : "";
+          clients.push({ id: client.id, label: client.label, open: client.pattern ? Boolean(open) : true });
+        }
+        send(res, 200, { ok: true, client: chosen.id, clients }, origin);
+        return;
+      }
+      if (req.method === "POST") {
+        const body = await readJson(req);
+        const chosen = CLIENTS.find((client) => client.id === body.client);
+        if (!chosen) {
+          send(res, 400, { ok: false, error: "unknown client" }, origin);
+          return;
+        }
+        try {
+          mkdirSync(dirname(SETTINGS_FILE), { recursive: true });
+          writeFileSync(SETTINGS_FILE, JSON.stringify({ ...readSettings(), client: chosen.id }), "utf8");
+        } catch (err) {
+          send(res, 500, { ok: false, error: String(err && err.message ? err.message : err) }, origin);
+          return;
+        }
+        if (driver) await driver.prefer(chosen.pattern);
+        log(`default client: ${chosen.label}`);
+        send(res, 200, { ok: true, client: chosen.id }, origin);
+        return;
+      }
     }
 
     // Start-with-Windows as a TOGGLE rather than a flag you have to know.
