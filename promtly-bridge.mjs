@@ -57,7 +57,7 @@ import { tmpdir, homedir, EOL } from "node:os";
 import { join, dirname, relative, isAbsolute, extname, resolve as resolvePath } from "node:path";
 
 const PORT = Number(process.env.PROMTLY_BRIDGE_PORT || 37222);
-const VERSION = "0.7.3";
+const VERSION = "0.7.4";
 const BOARD_DIR = process.env.PROMTLY_BOARD_DIR ? realpathSync(process.env.PROMTLY_BOARD_DIR) : null;
 
 /** Where the board is served from, for the local mirror. */
@@ -1667,7 +1667,7 @@ function send(res, status, body, origin) {
 
 function readJson(req) {
   return new Promise((resolve, reject) => {
-    let raw = "";
+    const chunks = [];
     let size = 0;
     req.on("data", (chunk) => {
       size += chunk.length;
@@ -1677,16 +1677,19 @@ function readJson(req) {
         req.destroy();
         return;
       }
-      raw += chunk;
+      chunks.push(chunk);
     });
     req.on("end", () => {
       try {
+        // UTF-8 characters may span TCP chunks. Decode the complete byte stream.
+        const raw = Buffer.concat(chunks, size).toString("utf8");
         resolve(raw ? JSON.parse(raw) : {});
       } catch (err) {
         reject(err);
       }
     });
     req.on("error", reject);
+    req.on("aborted", () => reject(new Error("request aborted")));
   });
 }
 
