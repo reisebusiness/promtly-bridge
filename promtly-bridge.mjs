@@ -39,7 +39,7 @@
 
 import http from "node:http";
 import { spawn } from "node:child_process";
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import {
   writeFileSync,
   copyFileSync,
@@ -49,13 +49,16 @@ import {
   readFileSync,
   readdirSync,
   statSync,
+  realpathSync,
+  renameSync,
   rmSync,
 } from "node:fs";
 import { tmpdir, homedir, EOL } from "node:os";
-import { join, dirname, resolve as resolvePath } from "node:path";
+import { join, dirname, relative, isAbsolute, extname, resolve as resolvePath } from "node:path";
 
 const PORT = Number(process.env.PROMTLY_BRIDGE_PORT || 37222);
-const VERSION = "0.7.2";
+const VERSION = "0.7.3";
+const BOARD_DIR = process.env.PROMTLY_BOARD_DIR ? realpathSync(process.env.PROMTLY_BOARD_DIR) : null;
 
 /** Where the board is served from, for the local mirror. */
 const UPSTREAM = (process.env.PROMTLY_UPSTREAM || "https://promtly.dev").replace(/\/+$/, "");
@@ -377,16 +380,16 @@ function injectLocalLayer(html) {
   const version = localStamp();
   const hasCustomJs = existsSync(CUSTOM_JS);
   const tags =
-    `
+    `<meta name="promtly-bridge-origin" content="http://127.0.0.1:${PORT}">\n` + `
 <link id="promtly-local-theme" rel="stylesheet" href="/local/theme.css?v=${version}">` +
     (hasCustomJs ? `
 <script src="/local/custom.js?v=${version}" defer></script>` : "") +
     `
-<script>(function(){var v=${JSON.stringify(version)};setInterval(function(){` +
+<script>(function(){var v=${JSON.stringify(version)},busy=false;function tick(){if(document.hidden||busy)return;busy=true;` +
     `fetch("/local/version",{cache:"no-store"}).then(function(r){return r.text()}).then(function(n){` +
     `if(n===v)return;v=n;var l=document.getElementById("promtly-local-theme");` +
     `if(l)l.setAttribute("href","/local/theme.css?v="+encodeURIComponent(n));` +
-    `else location.reload();}).catch(function(){});},1500);})();</script>
+    `else location.reload();}).catch(function(){}).finally(function(){busy=false});}setInterval(tick,1500);document.addEventListener("visibilitychange",tick);})();</script>
 <script>${BOOT_WATCHDOG}</script>
 `;
 
@@ -1313,7 +1316,7 @@ class HotkeyHost {
   }
 }
 
-const supported = process.platform === "win32";
+const supported = process.platform === "win32" && process.env.PROMTLY_NO_NATIVE !== "1";
 
 // ---------------------------------------------------------------------------
 // Start with Windows.
@@ -1516,6 +1519,7 @@ function isDevelopmentCopy() {
 }
 
 async function checkForUpdate(force = false) {
+  if (BOARD_DIR) return null; // A packaged board and bridge update together.
   if (!force && Date.now() - upstreamCheckedAt < UPDATE_CHECK_MS) return upstreamVersion;
   upstreamCheckedAt = Date.now();
   try {
@@ -1542,6 +1546,7 @@ function updateAvailable() {
  * and leaving no way back from a launcher that no longer starts.
  */
 async function installUpdate() {
+  if (BOARD_DIR) return { ok: false, error: "This packaged bridge updates with its local board. Install a newer complete package." };
   if (isDevelopmentCopy()) {
     return { ok: false, error: "this bridge is inside a git checkout - update it with git, not from here" };
   }
@@ -1708,6 +1713,66 @@ function log(line) {
 // time, so a cached page can never bake in a stale layer.
 // ---------------------------------------------------------------------------
 
+// BEGIN LOCAL BUNDLE HELPERS — dependency-free, exercised without native hosts.
+const bundledManifests = new Map();
+const bundledBodies = new Map();
+let bundledBytes = 0;
+function bundledManifest(directory) {
+  if (bundledManifests.has(directory)) return bundledManifests.get(directory);
+  const path = join(directory, "bundle.json");
+  if (realpathSync(path) !== resolvePath(path) || statSync(path).size > 1024 * 1024) throw Error("Invalid bundle manifest");
+  const manifest = JSON.parse(readFileSync(path, "utf8"));
+  if (manifest.schema !== 1 || !/^[a-f0-9]{64}$/.test(manifest.revision) || !manifest.files || typeof manifest.files !== "object" || Array.isArray(manifest.files)) throw Error("Invalid bundle manifest");
+  const files = Object.entries(manifest.files);
+  if (!files.length || files.length > 1000) throw Error("Invalid bundle file count");
+  let total = 0;
+  for (const [name, file] of files) {
+    if (!/^[a-zA-Z0-9_@.()/\[\]-]+$/.test(name) || name.startsWith('/') || name.split('/').some((part) => !part || part.startsWith('.')) || !/^[a-f0-9]{64}$/.test(file?.sha256) || !Number.isInteger(file.bytes) || file.bytes < 0 || file.bytes > 8 * 1024 * 1024) throw Error("Invalid bundle file");
+    total += file.bytes;
+  }
+  if (total > 64 * 1024 * 1024 || createHash("sha256").update(JSON.stringify(manifest.files)).digest("hex") !== manifest.revision) throw Error("Invalid bundle revision");
+  bundledManifests.set(directory, manifest);
+  return manifest;
+}
+function readBundledBoard(directory, pathname, rsc = false) {
+  const manifest = bundledManifest(directory);
+  let name;
+  try { name = decodeURIComponent(pathname).replace(/^\/+|\/+$/g, ""); } catch { return null; }
+  if (name.includes('\\') || name.split('/').some((part) => part.startsWith('.'))) return null;
+  if (!name) name = "index";
+  if (!extname(name)) name += rsc ? ".txt" : ".html";
+  if (!Object.hasOwn(manifest.files, name)) return null;
+  const path = resolvePath(directory, name);
+  const within = relative(directory, realpathSync(path));
+  if (!within || within.startsWith('..') || isAbsolute(within) || realpathSync(path) !== path) throw Error("Linked bundle asset");
+  const expected = manifest.files[name]; const stat = statSync(path);
+  if (!stat.isFile() || stat.size !== expected.bytes) throw Error("Changed bundle asset");
+  let cached = bundledBodies.get(path);
+  if (!cached || cached.mtime !== stat.mtimeMs) {
+    const body = readFileSync(path);
+    if (createHash("sha256").update(body).digest("hex") !== expected.sha256) throw Error("Changed bundle asset");
+    if (cached) { bundledBytes -= cached.body.length; bundledBodies.delete(path); }
+    while (bundledBytes + body.length > 16 * 1024 * 1024 && bundledBodies.size) {
+      const oldest = bundledBodies.keys().next().value;
+      bundledBytes -= bundledBodies.get(oldest).body.length; bundledBodies.delete(oldest);
+    }
+    cached = { body, mtime: stat.mtimeMs }; bundledBodies.set(path, cached); bundledBytes += body.length;
+  }
+  const extension = extname(name);
+  const type = extension === '.txt' && Object.hasOwn(manifest.files, name.slice(0, -4) + '.html') ? 'text/x-component' : ({ '.html': 'text/html; charset=utf-8', '.js': 'application/javascript; charset=utf-8', '.css': 'text/css; charset=utf-8', '.json': 'application/json', '.txt': 'text/plain; charset=utf-8', '.svg': 'image/svg+xml', '.png': 'image/png', '.jpg': 'image/jpeg', '.webp': 'image/webp', '.ico': 'image/x-icon', '.woff2': 'font/woff2', '.woff': 'font/woff', '.xml': 'application/xml' }[extension] || 'application/octet-stream');
+  return { body: cached.body, type };
+}
+function atomicPadWrite(file, value) {
+  const temporary = `${file}.${process.pid}.${randomUUID()}.tmp`;
+  try {
+    writeFileSync(temporary, JSON.stringify(value), { encoding: "utf8", flag: "wx", mode: 0o600, flush: true });
+    renameSync(temporary, file);
+  } finally {
+    if (existsSync(temporary)) rmSync(temporary); // This call created this exact file.
+  }
+}
+// END LOCAL BUNDLE HELPERS
+
 const CACHE_DIR = join(LOCAL_DIR, "cache");
 /** Past this, a hit is still served but revalidated behind the response. */
 const FRESH_MS = 60_000;
@@ -1784,8 +1849,17 @@ function cacheWrite(key, head, body) {
   }
 }
 
-/** Fetch from upstream and store. Returns {head, body} or null. */
-async function fetchUpstream(pathname, search, etag) {
+// Coalesce misses and bound both concurrency and bytes even on a slow upstream.
+const upstreamRequests = new Map();
+function fetchUpstream(pathname, search, etag) {
+  const key = JSON.stringify([pathname, search, etag]);
+  if (upstreamRequests.has(key)) return upstreamRequests.get(key);
+  if (upstreamRequests.size >= 32) return Promise.reject(Error("Board requests are busy; retry shortly"));
+  const pending = fetchAndStore(pathname, search, etag).finally(() => upstreamRequests.delete(key));
+  upstreamRequests.set(key, pending);
+  return pending;
+}
+async function fetchAndStore(pathname, search, etag) {
   const headers = {
     accept: "*/*",
     "accept-encoding": "identity",
@@ -1796,9 +1870,18 @@ async function fetchUpstream(pathname, search, etag) {
     method: "GET",
     headers,
     redirect: "follow",
+    signal: AbortSignal.timeout(15000),
   });
   if (upstream.status === 304) return "unchanged";
-  const body = Buffer.from(await upstream.arrayBuffer());
+  const limit = 8 * 1024 * 1024;
+  if (Number(upstream.headers.get("content-length")) > limit) { await upstream.body?.cancel(); throw Error("Board asset exceeds 8 MiB"); }
+  const chunks = []; let size = 0;
+  for await (const chunk of upstream.body ?? []) {
+    size += chunk.length;
+    if (size > limit) throw Error("Board asset exceeds 8 MiB");
+    chunks.push(chunk);
+  }
+  const body = Buffer.concat(chunks, size);
   const head = {
     status: upstream.status,
     type: upstream.headers.get("content-type") || "application/octet-stream",
@@ -1823,19 +1906,23 @@ async function fetchUpstream(pathname, search, etag) {
 async function warmAssets(html) {
   const refs = new Set();
   for (const match of html.matchAll(/\/_next\/static\/[^"'\\\s)]+/g)) refs.add(match[0]);
-  const results = await Promise.all(
-    [...refs].map(async (ref) => {
+  if (refs.size > 128) return false;
+  const pending = [...refs];
+  let complete = true;
+  await Promise.all(Array.from({ length: Math.min(4, pending.length) }, async () => {
+    while (pending.length) {
+      const ref = pending.shift();
       const at = new URL(ref, UPSTREAM);
-      if (cacheRead(cacheKey(at.pathname, at.search))) return true;
+      if (cacheRead(cacheKey(at.pathname, at.search))) continue;
       try {
         const got = await fetchUpstream(at.pathname, at.search, "");
-        return got !== "unchanged" && got.head.status === 200;
+        if (got === "unchanged" || got.head.status !== 200) complete = false;
       } catch {
-        return false;
+        complete = false;
       }
-    }),
-  );
-  return results.every(Boolean);
+    }
+  }));
+  return complete;
 }
 
 function serveMirrored(res, head, body, isHead) {
@@ -1847,6 +1934,9 @@ function serveMirrored(res, head, body, isHead) {
     // only layer that can tell a deploy from a stale page.
     "cache-control": "no-store",
     "content-length": String(payload.length),
+    "x-content-type-options": "nosniff",
+    "x-frame-options": "DENY",
+    "referrer-policy": "no-referrer",
   };
   res.writeHead(head.status, headers);
   res.end(isHead ? undefined : payload);
@@ -1871,6 +1961,16 @@ async function proxyUpstream(req, res, url) {
   }
 
   const isHead = req.method === "HEAD";
+  if (BOARD_DIR) {
+    try {
+      const bundled = readBundledBoard(BOARD_DIR, url.pathname, req.headers.rsc === "1");
+      if (!bundled) { res.writeHead(404, { "Content-Type": "text/plain", "Cache-Control": "no-store" }).end("This page is not in the local board bundle."); return; }
+      serveMirrored(res, { status: 200, type: bundled.type }, bundled.body, isHead);
+    } catch {
+      res.writeHead(503, { "Content-Type": "text/plain", "Cache-Control": "no-store" }).end("The local board bundle is incomplete or changed. Rebuild or reinstall this preview.");
+    }
+    return; // An incomplete local bundle must never silently become a remote page.
+  }
   const key = cacheKey(url.pathname, url.search);
   const hit = cacheRead(key);
 
@@ -1912,6 +2012,11 @@ async function proxyUpstream(req, res, url) {
 }
 
 const server = http.createServer(async (req, res) => {
+  // Loopback binding alone does not reject a browser using a rebound hostname.
+  if (![ `127.0.0.1:${PORT}`, `localhost:${PORT}` ].includes(req.headers.host) || req.headers['x-forwarded-for'] || req.headers['x-forwarded-host'] || !req.url?.startsWith('/') || req.url.startsWith('//')) {
+    res.writeHead(403, { "Content-Type": "text/plain", "Cache-Control": "no-store" }).end("Local bridge host required");
+    return;
+  }
   const origin = req.headers.origin;
   const allowed = typeof origin === "string" && ALLOWED_ORIGINS.has(origin);
   const url = new URL(req.url || "/", `http://127.0.0.1:${PORT}`);
@@ -1937,7 +2042,7 @@ const server = http.createServer(async (req, res) => {
   // A same-origin POST still sends Origin, so the mirrored board satisfies
   // this. Read-only endpoints also answer a same-origin GET (no Origin) and
   // plain curl.
-  const readOnly =
+  const readOnly = req.method === "GET" && (
     url.pathname === "/health" ||
     url.pathname === "/captures" ||
     // ⚠ GET only. /startup also WRITES on POST (it puts a script in the
@@ -1951,7 +2056,7 @@ const server = http.createServer(async (req, res) => {
     // closer to script than to a stylesheet: the same reason there is no write
     // endpoint for custom.js. Only the board this process serves may write
     // them; anything may read them over loopback.
-    (url.pathname.startsWith("/local/") && !(url.pathname === "/local/pads" && req.method !== "GET"));
+    url.pathname.startsWith("/local/"));
   if (!readOnly && !allowed) {
     send(res, 403, { ok: false, error: "origin not allowed" }, undefined);
     return;
@@ -1998,7 +2103,8 @@ const server = http.createServer(async (req, res) => {
           updateAvailable: updateAvailable(),
           // A checkout's bridge is updated with git; the UI hides the badge
           // rather than offering something that will refuse.
-          updatable: !isDevelopmentCopy(),
+          updatable: !BOARD_DIR && !isDevelopmentCopy(),
+          board: { source: BOARD_DIR ? "bundled" : "mirrored", revision: BOARD_DIR ? bundledManifest(BOARD_DIR).revision : null },
         },
         origin,
       );
@@ -2060,17 +2166,16 @@ const server = http.createServer(async (req, res) => {
       const body = await readJson(req);
       // Only what another program needs to offer a pad: names and text. Board
       // settings, usage counts and anything else stay in the browser.
-      const decks = Array.isArray(body.decks) ? body.decks.slice(0, 50).map((deck) => ({
-        id: String(deck?.id ?? "").slice(0, 80),
-        name: String(deck?.name ?? "").slice(0, 120),
-        tiles: (Array.isArray(deck?.tiles) ? deck.tiles : []).slice(0, 200)
-          .filter((tile) => typeof tile?.label === "string" && typeof tile?.body === "string")
-          .map((tile) => ({ id: String(tile.id ?? "").slice(0, 80), label: tile.label.slice(0, 120), body: tile.body.slice(0, 8000) })),
-      })) : null;
-      if (!decks) { send(res, 400, { ok: false, error: "decks required" }, origin); return; }
+      // The request has a byte limit. Preserve every accepted string; clipping
+      // a long prompt silently changes the instruction offered by Parley.
+      const valid = Array.isArray(body.decks) && body.decks.every((deck) =>
+        typeof deck?.id === "string" && typeof deck?.name === "string" && Array.isArray(deck.tiles) &&
+        deck.tiles.every((tile) => typeof tile?.id === "string" && typeof tile?.label === "string" && typeof tile?.body === "string"));
+      if (!valid) { send(res, 400, { ok: false, error: "Each deck and pad requires its complete names, identifiers and text" }, origin); return; }
+      const decks = body.decks.map(({ id, name, tiles }) => ({ id, name, tiles: tiles.map(({ id, label, body }) => ({ id, label, body })) }));
       try {
         mkdirSync(dirname(PADS_FILE), { recursive: true });
-        writeFileSync(PADS_FILE, JSON.stringify({ decks, savedAt: new Date().toISOString() }), "utf8");
+        atomicPadWrite(PADS_FILE, { decks, savedAt: new Date().toISOString() });
         send(res, 200, { ok: true, decks: decks.length }, origin);
       } catch (err) {
         send(res, 500, { ok: false, error: String(err && err.message ? err.message : err) }, origin);

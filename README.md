@@ -26,7 +26,7 @@ and double-click it — it fetches this script itself and starts it.
 | **Talks only to promtly.dev** | two kinds of outbound call, both to that one host: fetching the board, and asking every six hours whether a newer bridge exists. Neither sends anything of yours |
 | **Answers only named origins** | a state-changing request without an allowed `Origin` is refused, so another site cannot drive it. No local origin is trusted by default |
 | **Verifies before it types** | focuses the target, checks focus actually landed, and declines to send Ctrl+V if Windows refused the switch |
-| **Keeps nothing of yours** | your pads live in your browser's storage. Captured selections are held in memory only and never touch the disk |
+| **Keeps your data local** | pads live in browser storage and a local `pads.json` snapshot for companion tools. Captured selections stay in memory until saved as pads |
 
 That fourth row is the important one. A prompt typed into the wrong window is
 worse than no paste, so it would rather tell you to press Ctrl+V yourself.
@@ -43,8 +43,24 @@ Being precise, because "stores nothing" would be a lie:
 | a temp `.ps1` | the PowerShell driver source, in the OS temp dir |
 | a Startup `.cmd` | **only** if you ask for it (`--install-startup`) |
 | `promtly-bridge.mjs.bak` | the previous version, kept when you take an update |
+| `%LOCALAPPDATA%/Promtly/pads.json` | deck names and complete prompt text shared by the local board; writes replace the snapshot atomically |
+| `%LOCALAPPDATA%/Promtly/settings.json` | the selected destination app |
 
-None of that is your prompts, your clipboard, or anything about how you use it.
+Pad text is readable by other programs on the same machine through the loopback
+API. `PROMTLY_PADS_FILE` can choose another private path. Do not put it in a
+public website folder. Settings and usage counts from the board are not shared.
+
+### Bundled board mode
+
+Parley's local preview can ship a board alongside this bridge. Setting
+`PROMTLY_BOARD_DIR` selects that versioned, SHA-256-checked bundle. The bridge
+then makes no mirror or update requests and refuses standalone self-updates;
+replace the complete package to upgrade. Missing or changed files produce a
+local recovery message. The board remains a separately licensed component.
+
+Mirror mode coalesces duplicate fetches, limits requests to 15 seconds and 8 MiB,
+and warms at most four static assets simultaneously. These limits bound local
+work; they do not establish savings in model cost or operator time.
 
 ## How it works
 
