@@ -18,27 +18,6 @@ node promtly-bridge.mjs
 Or download **`promtly-bridge.cmd`** from [promtly.dev/bridge](https://promtly.dev/bridge)
 and double-click it — it fetches this script itself and starts it.
 
-## Windows companion and Parley preview
-
-The optional [open-source companion](companion/README.md) adds an original
-forest adventurer, a project dock, clickable hover labels and saved folder
-shortcuts. It can sit around a supported existing Codex pet or use Grove by itself.
-
-Download the [Windows preview release](https://github.com/reisebusiness/promtly-bridge/releases/tag/v0.1.0-companion-preview).
-The release includes the MIT companion ZIP and a separately licensed Parley
-Windows preview with Node and the local Promtly board/bridge. The preview opens
-local setup in your browser. It is unsigned; hashes and source are available.
-No ChatGPT subscription is required. Installation needs your Windows consent;
-ordinary chat without local execution tools needs the documented manual steps.
-
-Copy one prompt into a coding assistant with local Windows tools:
-
-- [Public setup prompt](companion/PUBLIC_SETUP_PROMPT.md): an empty project slot plus Folders.
-- [Cashflo setup prompt](companion/SETUP_PROMPT.md): Cashflo plus Folders.
-
-Existing settings win over presets. The prompts include public download links
-and fixed SHA-256 checksums. No private workstation source or personal queue is included.
-
 ## What it does, and what it refuses to do
 
 | | |
