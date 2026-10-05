@@ -2,9 +2,9 @@ Set up my Windows Parley × Promtly preview and companion. I use Claude Desktop
 and my business is Cashflo.
 
 Download Parley-Setup.exe and Promtly-companion-0.1.0.zip from:
-https://github.com/reisebusiness/promtly-bridge/releases/download/v0.1.0-companion-preview/
+https://github.com/reisebusiness/promtly-bridge/releases/download/v0.1.1-companion-preview/
 Verify these SHA-256 hashes before running anything:
-4bc9e0ff4f72d612d1a640d08c3d03ae629d4b8fae302f54f4d4485a9d0cf1d2  Parley-Setup.exe
+0fe7464876e9d722e7edb1412ebf709973a6b87a2c88392f4b534e557bcf8826  Parley-Setup.exe
 d162f4d7ddb45d7f0af9abbf3fa1b7c24cf3af2fe5eb51a58c6a53a22c433c41  Promtly-companion-0.1.0.zip
 
 Use local execution tools if available. If this chat cannot download/run local

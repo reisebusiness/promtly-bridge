@@ -49,7 +49,7 @@ repository's private WebView desktop shell. The open-source companion ZIP alone
 does not install that workstation. `SETUP_PROMPT.md` is the Cashflo preset;
 `PUBLIC_SETUP_PROMPT.md` is the generic article prompt. The matching binaries,
 checksums and both prompts are published in the
-[Windows companion preview release](https://github.com/reisebusiness/promtly-bridge/releases/tag/v0.1.0-companion-preview).
+[Windows companion preview release](https://github.com/reisebusiness/promtly-bridge/releases/tag/v0.1.1-companion-preview).
 
 Windows 10/11 x64 with .NET Framework 4.8 is required. Source builds use Windows'
 existing compiler: `powershell.exe -NoProfile -File .\build.ps1`. Native tests:

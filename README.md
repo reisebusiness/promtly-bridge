@@ -24,7 +24,7 @@ The optional [open-source companion](companion/README.md) adds an original
 forest adventurer, a project dock, clickable hover labels and saved folder
 shortcuts. It can sit around a supported existing Codex pet or use Grove by itself.
 
-Download the [Windows preview release](https://github.com/reisebusiness/promtly-bridge/releases/tag/v0.1.0-companion-preview).
+Download the [Windows preview release](https://github.com/reisebusiness/promtly-bridge/releases/tag/v0.1.1-companion-preview).
 The release includes the MIT companion ZIP and a separately licensed Parley
 Windows preview with Node and the local Promtly board/bridge. The preview opens
 local setup in your browser. It is unsigned; hashes and source are available.
