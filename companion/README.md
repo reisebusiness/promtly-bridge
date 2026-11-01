@@ -1,5 +1,7 @@
 # Promtly companion
 
+> **Availability:** The Parley Windows preview release is no longer publicly distributed. Download links and setup prompts below are historical.
+
 A compact Windows project dock with Grove, an original forest adventurer.
 No ChatGPT or Codex installation is required. **Automatic** mode uses an existing
 supported Codex Windows pet when present, attaching the dock around its live
