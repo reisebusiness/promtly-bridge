@@ -1,3 +1,5 @@
+NOTICE: The Parley Windows preview release is no longer publicly distributed. The download links below are historical and will not work.
+
 Set up my Windows Parley × Promtly preview and companion. I use Claude Desktop
 and my business is Cashflo.
 
