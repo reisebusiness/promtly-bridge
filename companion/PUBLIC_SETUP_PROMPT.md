@@ -1,3 +1,5 @@
+NOTICE: The Parley Windows preview release is no longer publicly distributed. The download links below are historical and will not work.
+
 Set up the Windows Parley × Promtly preview and companion.
 
 Download Parley-Setup.exe and Promtly-companion-0.1.0.zip from:
