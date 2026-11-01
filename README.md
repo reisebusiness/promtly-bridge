@@ -1,5 +1,7 @@
 # promtly-bridge
 
+> **Availability:** The Parley Windows preview release is no longer publicly distributed. Download links and setup prompts below are historical.
+
 **The local half of [promtly.dev](https://promtly.dev) — open, because you are
 about to run it on your own machine.**
 
